@@ -7,6 +7,20 @@ const TASK_SUBAGENT_LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
 const TASK_SUBAGENT_PROGRESS_CHANNEL = "task:subagent:progress";
 const WIDGET_KEY = "omp-subagent-costs";
 
+type SubagentFrameChannel = typeof TASK_SUBAGENT_LIFECYCLE_CHANNEL | typeof TASK_SUBAGENT_PROGRESS_CHANNEL;
+type SubagentFrameRelay = (channel: SubagentFrameChannel, value: unknown) => void;
+
+// OMP gives each nested session its own extension EventBus. Extension factories
+// are rebound from one module instance, so relay nested frames to the root
+// plugin instance without persisting a second source of truth.
+const SUBAGENT_FRAME_RELAYS = new Set<SubagentFrameRelay>();
+
+function relaySubagentFrame(source: SubagentFrameRelay, channel: SubagentFrameChannel, value: unknown): void {
+	for (const relay of SUBAGENT_FRAME_RELAYS) {
+		if (relay !== source) relay(channel, value);
+	}
+}
+
 type SubagentLifecycleStatus = "started" | "completed" | "failed" | "aborted";
 
 interface SubagentLifecycleFrame {
@@ -198,23 +212,20 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.on("session_start", (_value, ctx) => reset(ctx));
-	pi.on("session_switch", (_value, ctx) => reset(ctx));
-	pi.on("session_branch", (_value, ctx) => reset(ctx));
-	pi.on("session_tree", (_value, ctx) => reset(ctx));
-	pi.on("session_shutdown", (_value, ctx) => {
-		refreshGeneration += 1;
-		hydrated = EMPTY_HYDRATED_COSTS;
-		liveRuns.clear();
-		liveDetachedRoots.clear();
-		repaint(ctx);
-		activeContext = undefined;
-	});
+	const ownsRelayedFrame = (sessionFile: string | null | undefined): boolean => {
+		if (!sessionFile || !activeContext) return false;
+		try {
+			const rootSessionFile = activeContext.sessionManager.getSessionFile();
+			return rootSessionFile ? belongsToRoot(sessionFile, rootSessionFile) : false;
+		} catch {
+			return false;
+		}
+	};
 
-	pi.events.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, value => {
+	const handleLifecycle = (value: unknown, relayed: boolean): void => {
 		try {
 			const frame = parseLifecycleFrame(value);
-			if (!frame) return;
+			if (!frame || (relayed && !ownsRelayedFrame(frame.sessionFile))) return;
 			const sessionFile = frame.sessionFile ?? undefined;
 			const key = runKey(frame.id, sessionFile);
 			if (frame.status === "started") {
@@ -245,12 +256,12 @@ export default function (pi: ExtensionAPI): void {
 		} catch {
 			// Raw event channels are untrusted input; malformed frames are ignored.
 		}
-	});
+	};
 
-	pi.events.on(TASK_SUBAGENT_PROGRESS_CHANNEL, value => {
+	const handleProgress = (value: unknown, relayed: boolean): void => {
 		try {
 			const frame = parseProgressFrame(value);
-			if (!frame) return;
+			if (!frame || (relayed && !ownsRelayedFrame(frame.sessionFile))) return;
 			const key = runKey(frame.id, frame.sessionFile);
 			const run = liveRuns.get(key);
 			if (!run) {
@@ -262,5 +273,34 @@ export default function (pi: ExtensionAPI): void {
 		} catch {
 			// Raw event channels are untrusted input; malformed frames are ignored.
 		}
+	};
+
+	const frameRelay: SubagentFrameRelay = (channel, value) => {
+		if (channel === TASK_SUBAGENT_LIFECYCLE_CHANNEL) handleLifecycle(value, true);
+		else handleProgress(value, true);
+	};
+	SUBAGENT_FRAME_RELAYS.add(frameRelay);
+
+	pi.on("session_start", (_value, ctx) => reset(ctx));
+	pi.on("session_switch", (_value, ctx) => reset(ctx));
+	pi.on("session_branch", (_value, ctx) => reset(ctx));
+	pi.on("session_tree", (_value, ctx) => reset(ctx));
+	pi.on("session_shutdown", (_value, ctx) => {
+		SUBAGENT_FRAME_RELAYS.delete(frameRelay);
+		refreshGeneration += 1;
+		hydrated = EMPTY_HYDRATED_COSTS;
+		liveRuns.clear();
+		liveDetachedRoots.clear();
+		repaint(ctx);
+		activeContext = undefined;
+	});
+
+	pi.events.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, value => {
+		handleLifecycle(value, false);
+		relaySubagentFrame(frameRelay, TASK_SUBAGENT_LIFECYCLE_CHANNEL, value);
+	});
+	pi.events.on(TASK_SUBAGENT_PROGRESS_CHANNEL, value => {
+		handleProgress(value, false);
+		relaySubagentFrame(frameRelay, TASK_SUBAGENT_PROGRESS_CHANNEL, value);
 	});
 }

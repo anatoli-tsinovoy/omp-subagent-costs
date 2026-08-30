@@ -217,6 +217,31 @@ describe("omp-subagent-costs plugin", () => {
 		expect(harness.notifications).toEqual(["Async subagent cost hidden.", "Async subagent cost shown."]);
 	});
 
+	it("relays nested subagent progress to the owning root widget", async () => {
+		const root = await fixtureRoot();
+		const asyncRoot = path.join(root.slice(0, -6), "async-root.jsonl");
+		await writeAsyncTranscript(asyncRoot, 1);
+		const rootHarness = createHarness(root);
+		const childHarness = createHarness(asyncRoot);
+		await rootHarness.emit("session_start", {});
+		await childHarness.emit("session_start", {});
+
+		const nestedFile = path.join(asyncRoot.slice(0, -6), "nested.jsonl");
+		childHarness.bus.emit(LIFECYCLE_CHANNEL, {
+			id: "nested",
+			status: "started",
+			detached: false,
+			sessionFile: nestedFile,
+		});
+		childHarness.bus.emit(PROGRESS_CHANNEL, { id: "nested", sessionFile: nestedFile, cost: 2.5 });
+
+		expect(latestWidget(rootHarness.updates)).toEqual({
+			key: WIDGET_KEY,
+			content: ["$3.50 (async)"],
+			placement: "aboveEditor",
+		});
+	});
+
 	it("clears the prior session immediately when switching", async () => {
 		const firstRoot = await fixtureRoot();
 		const harness = createHarness(firstRoot);
