@@ -7,7 +7,7 @@ import { nonEmptyString, recordOf, validCost } from "./values";
 export interface HydratedCosts {
 	total: number;
 	costBySessionFile: ReadonlyMap<string, number>;
-	asyncRoots: ReadonlySet<string>;
+	includedRoots: ReadonlySet<string>;
 }
 
 function sessionEntryOf(value: unknown): SessionEntry | undefined {
@@ -57,28 +57,36 @@ async function listTranscriptFiles(directory: string): Promise<string[]> {
 	return files;
 }
 
-function asyncChildren(parentSessionFile: string, branch: readonly SessionEntry[]): string[] {
-	const files = new Set<string>();
+interface TaskChildren {
+	async: string[];
+	synchronous: string[];
+}
+
+function taskChildren(parentSessionFile: string, branch: readonly SessionEntry[]): TaskChildren {
+	const async = new Set<string>();
+	const synchronous = new Set<string>();
 	for (const entry of branch) {
 		if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "task") continue;
 		const details = recordOf(entry.message.details);
-		const asyncDetails = recordOf(details?.async);
-		if (!details || asyncDetails?.type !== "task" || !Array.isArray(details.progress)) continue;
+		if (!details) continue;
 
-		const synchronousIds = new Set<string>();
 		if (Array.isArray(details.results)) {
 			for (const resultValue of details.results) {
 				const result = recordOf(resultValue);
-				if (nonEmptyString(result?.id)) synchronousIds.add(result.id);
+				if (!nonEmptyString(result?.id)) continue;
+				synchronous.add(path.resolve(parentSessionFile.slice(0, -".jsonl".length), `${result.id}.jsonl`));
 			}
 		}
+		const asyncDetails = recordOf(details.async);
+		if (asyncDetails?.type !== "task" || !Array.isArray(details.progress)) continue;
 		for (const progressValue of details.progress) {
 			const progress = recordOf(progressValue);
-			if (!nonEmptyString(progress?.id) || synchronousIds.has(progress.id)) continue;
-			files.add(path.resolve(parentSessionFile.slice(0, -".jsonl".length), `${progress.id}.jsonl`));
+			if (!nonEmptyString(progress?.id)) continue;
+			const file = path.resolve(parentSessionFile.slice(0, -".jsonl".length), `${progress.id}.jsonl`);
+			if (!synchronous.has(file)) async.add(file);
 		}
 	}
-	return [...files];
+	return { async: [...async], synchronous: [...synchronous] };
 }
 
 function assistantCost(branch: readonly SessionEntry[]): number {
@@ -95,15 +103,21 @@ function isAtOrBelow(file: string, root: string): boolean {
 	return file === root || file.startsWith(`${root.slice(0, -".jsonl".length)}${path.sep}`);
 }
 
-/** Reconstruct async-only spend from the canonical active transcript tree. */
-export async function hydrateAsyncSubagentCosts(
+/**
+ * Reconstruct child-agent spend that the root status-line session cost does not
+ * already include. Root-level synchronous `task` results are excluded because
+ * SessionStats rolls their usage into the parent. Detached task trees, eval
+ * agents, and descendants of either remain separate and are included.
+ */
+export async function hydrateUnreportedSubagentCosts(
 	rootSessionFile: string | null | undefined,
 	rootBranchValues: readonly unknown[],
 ): Promise<HydratedCosts> {
-	if (!rootSessionFile) return { total: 0, costBySessionFile: new Map(), asyncRoots: new Set() };
+	if (!rootSessionFile) return { total: 0, costBySessionFile: new Map(), includedRoots: new Set() };
 
 	const normalizedRoot = path.resolve(rootSessionFile);
-	const childFiles = await listTranscriptFiles(normalizedRoot.slice(0, -".jsonl".length));
+	const transcriptDirectory = normalizedRoot.slice(0, -".jsonl".length);
+	const childFiles = await listTranscriptFiles(transcriptDirectory);
 	const branches = new Map<string, SessionEntry[]>();
 	for (const file of childFiles) {
 		try {
@@ -113,18 +127,27 @@ export async function hydrateAsyncSubagentCosts(
 		}
 	}
 
-	const rootBranch = activeBranch(rootBranchValues);
-	const asyncRoots = new Set(asyncChildren(normalizedRoot, rootBranch));
+	const rootChildren = taskChildren(normalizedRoot, activeBranch(rootBranchValues));
+	const synchronousRootFiles = new Set(rootChildren.synchronous);
+	const includedRoots = new Set(rootChildren.async);
+
+	// Direct child transcripts not represented by synchronous task results are
+	// eval agent() children (or legacy agents without invocation metadata).
+	for (const file of branches.keys()) {
+		if (path.dirname(file) === transcriptDirectory && !synchronousRootFiles.has(file)) includedRoots.add(file);
+	}
 	for (const [file, branch] of branches) {
-		if (branch.some(entry => entry.type === "session_init" && recordOf(entry)?.detached === true)) asyncRoots.add(file);
-		for (const child of asyncChildren(file, branch)) asyncRoots.add(child);
+		if (branch.some(entry => entry.type === "session_init" && recordOf(entry)?.detached === true)) {
+			includedRoots.add(file);
+		}
+		for (const child of taskChildren(file, branch).async) includedRoots.add(child);
 	}
 
 	const costBySessionFile = new Map<string, number>();
 	let total = 0;
 	for (const [file, branch] of branches) {
 		let included = false;
-		for (const root of asyncRoots) {
+		for (const root of includedRoots) {
 			if (isAtOrBelow(file, root)) {
 				included = true;
 				break;
@@ -136,5 +159,5 @@ export async function hydrateAsyncSubagentCosts(
 		total += cost;
 	}
 
-	return { total, costBySessionFile, asyncRoots };
+	return { total, costBySessionFile, includedRoots };
 }

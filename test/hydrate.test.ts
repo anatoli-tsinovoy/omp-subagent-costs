@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
-import { hydrateAsyncSubagentCosts } from "../src/hydrate";
+import { hydrateUnreportedSubagentCosts } from "../src/hydrate";
 
 const temporaryDirectories: string[] = [];
 const timestamp = "2026-01-01T00:00:00.000Z";
@@ -79,22 +79,26 @@ afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
 });
 
-describe("hydrateAsyncSubagentCosts", () => {
-	it("hydrates pre-install async spend and includes blocking descendants", async () => {
+describe("hydrateUnreportedSubagentCosts", () => {
+	it("includes eval and async trees but excludes root synchronous task spend", async () => {
 		const root = await fixtureRoot();
 		const asyncFile = path.join(root.slice(0, -6), "async.jsonl");
 		const blockingChild = path.join(asyncFile.slice(0, -6), "blocking.jsonl");
-		const blockingRoot = path.join(root.slice(0, -6), "standalone.jsonl");
+		const evalFile = path.join(root.slice(0, -6), "eval-agent.jsonl");
+		const synchronousFile = path.join(root.slice(0, -6), "synchronous-task.jsonl");
 		await writeTranscript(asyncFile, [assistantEntry("async-cost", "init", 2.5)], true);
 		await writeTranscript(blockingChild, [assistantEntry("child-cost", "init", 1.25)], false);
-		await writeTranscript(blockingRoot, [assistantEntry("excluded-cost", "init", 9)], false);
+		await writeTranscript(evalFile, [assistantEntry("eval-cost", "init", 9)], false);
+		await writeTranscript(synchronousFile, [assistantEntry("sync-cost", "init", 8)], false);
+		const rootBranch = [asyncTaskEntry("task-result", null, ["async"], ["synchronous-task"])];
 
-		const hydrated = await hydrateAsyncSubagentCosts(root, []);
+		const hydrated = await hydrateUnreportedSubagentCosts(root, rootBranch);
 
-		expect(hydrated.total).toBe(3.75);
+		expect(hydrated.total).toBe(12.75);
 		expect(hydrated.costBySessionFile.get(path.resolve(asyncFile))).toBe(2.5);
 		expect(hydrated.costBySessionFile.get(path.resolve(blockingChild))).toBe(1.25);
-		expect(hydrated.costBySessionFile.has(path.resolve(blockingRoot))).toBe(false);
+		expect(hydrated.costBySessionFile.get(path.resolve(evalFile))).toBe(9);
+		expect(hydrated.costBySessionFile.has(path.resolve(synchronousFile))).toBe(false);
 	});
 
 	it("discovers legacy async roots from task results without session-init metadata", async () => {
@@ -103,10 +107,10 @@ describe("hydrateAsyncSubagentCosts", () => {
 		await writeTranscript(asyncFile, [assistantEntry("cost", "init", 4)]);
 		const rootBranch = [asyncTaskEntry("task-result", null, ["legacy"])];
 
-		const hydrated = await hydrateAsyncSubagentCosts(root, rootBranch);
+		const hydrated = await hydrateUnreportedSubagentCosts(root, rootBranch);
 
 		expect(hydrated.total).toBe(4);
-		expect(hydrated.asyncRoots.has(path.resolve(asyncFile))).toBe(true);
+		expect(hydrated.includedRoots.has(path.resolve(asyncFile))).toBe(true);
 	});
 
 	it("finds an async tree spawned below a standalone synchronous root", async () => {
@@ -116,7 +120,9 @@ describe("hydrateAsyncSubagentCosts", () => {
 		await writeTranscript(syncFile, [asyncTaskEntry("spawn", "init", ["nested-async"]), assistantEntry("sync-cost", "spawn", 8)], false);
 		await writeTranscript(asyncFile, [assistantEntry("async-cost", "init", 3)], false);
 
-		const hydrated = await hydrateAsyncSubagentCosts(root, []);
+		const hydrated = await hydrateUnreportedSubagentCosts(root, [
+			asyncTaskEntry("root-task", null, [], ["sync"]),
+		]);
 
 		expect(hydrated.total).toBe(3);
 		expect(hydrated.costBySessionFile.has(path.resolve(syncFile))).toBe(false);
@@ -131,7 +137,7 @@ describe("hydrateAsyncSubagentCosts", () => {
 			true,
 		);
 
-		const hydrated = await hydrateAsyncSubagentCosts(root, [asyncTaskEntry("task-result", null, ["async"])]);
+		const hydrated = await hydrateUnreportedSubagentCosts(root, [asyncTaskEntry("task-result", null, ["async"])]);
 
 		expect(hydrated.total).toBe(2);
 		expect(hydrated.costBySessionFile.size).toBe(1);

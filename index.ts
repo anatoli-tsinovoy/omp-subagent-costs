@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { type HydratedCosts, hydrateAsyncSubagentCosts } from "./src/hydrate";
+import { type HydratedCosts, hydrateUnreportedSubagentCosts } from "./src/hydrate";
 import { hasOwn, nonEmptyString, recordOf, type RecordValue, validCost } from "./src/values";
 
 const TASK_SUBAGENT_LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
@@ -52,7 +52,7 @@ interface LiveRun {
 const EMPTY_HYDRATED_COSTS: HydratedCosts = {
 	total: 0,
 	costBySessionFile: new Map(),
-	asyncRoots: new Set(),
+	includedRoots: new Set(),
 };
 
 
@@ -140,7 +140,7 @@ export default function (pi: ExtensionAPI): void {
 
 	const includedByRoot = (sessionFile: string | undefined): boolean => {
 		if (!sessionFile) return false;
-		for (const root of hydrated.asyncRoots) {
+		for (const root of hydrated.includedRoots) {
 			if (belongsToRoot(sessionFile, root)) return true;
 		}
 		for (const root of liveDetachedRoots) {
@@ -162,7 +162,7 @@ export default function (pi: ExtensionAPI): void {
 		if (!ctx || !ctx.hasUI || ctx.mode !== "tui") return;
 		try {
 			const cost = total();
-			const content = !visible || cost === 0 ? undefined : [`$${cost.toFixed(2)} (async)`];
+			const content = !visible || cost === 0 ? undefined : [`$${cost.toFixed(2)} (agents)`];
 			ctx.ui.setWidget(WIDGET_KEY, content, { placement: "aboveEditor" });
 		} catch {
 			// UI teardown and malformed host contexts must not break event handling.
@@ -175,7 +175,7 @@ export default function (pi: ExtensionAPI): void {
 		try {
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			const branch = ctx.sessionManager.getBranch();
-			next = await hydrateAsyncSubagentCosts(sessionFile, branch);
+			next = await hydrateUnreportedSubagentCosts(sessionFile, branch);
 		} catch {
 			return;
 		}
@@ -203,12 +203,12 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	pi.registerCommand("subagent-costs", {
-		description: "Show or hide the async subagent cost",
+		description: "Show or hide unreported subagent cost",
 		handler: async (_args, ctx) => {
 			activeContext = ctx;
 			visible = !visible;
 			repaint(ctx);
-			ctx.ui.notify(`Async subagent cost ${visible ? "shown" : "hidden"}.`, "info");
+			ctx.ui.notify(`Unreported subagent cost ${visible ? "shown" : "hidden"}.`, "info");
 		},
 	});
 
@@ -285,6 +285,9 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_switch", (_value, ctx) => reset(ctx));
 	pi.on("session_branch", (_value, ctx) => reset(ctx));
 	pi.on("session_tree", (_value, ctx) => reset(ctx));
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.toolName === "eval") await refresh(ctx);
+	});
 	pi.on("session_shutdown", (_value, ctx) => {
 		SUBAGENT_FRAME_RELAYS.delete(frameRelay);
 		refreshGeneration += 1;

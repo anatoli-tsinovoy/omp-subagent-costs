@@ -1,7 +1,7 @@
 {
   "name": "omp-subagent-costs",
-  "version": "1.0.0",
-  "description": "Show asynchronous subagent spend in the OMP status line",
+  "version": "1.0.1",
+  "description": "Show subagent spend omitted from the OMP session cost",
   "private": false,
   "license": "MIT",
   "author": "Anatoli Tsinovoy",

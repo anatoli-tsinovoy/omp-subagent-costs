@@ -101,7 +101,7 @@ async function fixtureRoot(): Promise<string> {
 	return path.join(directory, "root.jsonl");
 }
 
-async function writeAsyncTranscript(file: string, cost: number): Promise<void> {
+async function writeTranscript(file: string, cost: number, detached = true): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	const timestamp = "2026-01-01T00:00:00.000Z";
 	const entries = [
@@ -114,7 +114,7 @@ async function writeAsyncTranscript(file: string, cost: number): Promise<void> {
 			systemPrompt: "test",
 			task: "test",
 			tools: [],
-			detached: true,
+			detached,
 		},
 		{
 			type: "message",
@@ -164,28 +164,28 @@ describe("omp-subagent-costs plugin", () => {
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 2.25 });
 		expect(latestWidget(harness.updates)).toEqual({
 			key: WIDGET_KEY,
-			content: ["$2.25 (async)"],
+			content: ["$2.25 (agents)"],
 			placement: "aboveEditor",
 		});
 
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 1.5 });
 		expect(latestWidget(harness.updates)).toEqual({
 			key: WIDGET_KEY,
-			content: ["$1.50 (async)"],
+			content: ["$1.50 (agents)"],
 			placement: "aboveEditor",
 		});
 	});
 
-	it("hydrates historical async cost without custom plugin entries", async () => {
+	it("hydrates historical unreported agent cost without custom plugin entries", async () => {
 		const root = await fixtureRoot();
-		await writeAsyncTranscript(path.join(root.slice(0, -6), "historical.jsonl"), 4.75);
+		await writeTranscript(path.join(root.slice(0, -6), "historical-eval.jsonl"), 4.75, false);
 		const harness = createHarness(root);
 
 		await harness.emit("session_start", {});
 
 		expect(latestWidget(harness.updates)).toEqual({
 			key: WIDGET_KEY,
-			content: ["$4.75 (async)"],
+			content: ["$4.75 (agents)"],
 			placement: "aboveEditor",
 		});
 	});
@@ -211,16 +211,16 @@ describe("omp-subagent-costs plugin", () => {
 		await harness.runCommand(COMMAND_NAME);
 		expect(latestWidget(harness.updates)).toEqual({
 			key: WIDGET_KEY,
-			content: ["$3.50 (async)"],
+			content: ["$3.50 (agents)"],
 			placement: "aboveEditor",
 		});
-		expect(harness.notifications).toEqual(["Async subagent cost hidden.", "Async subagent cost shown."]);
+		expect(harness.notifications).toEqual(["Unreported subagent cost hidden.", "Unreported subagent cost shown."]);
 	});
 
 	it("relays nested subagent progress to the owning root widget", async () => {
 		const root = await fixtureRoot();
 		const asyncRoot = path.join(root.slice(0, -6), "async-root.jsonl");
-		await writeAsyncTranscript(asyncRoot, 1);
+		await writeTranscript(asyncRoot, 1);
 		const rootHarness = createHarness(root);
 		const childHarness = createHarness(asyncRoot);
 		await rootHarness.emit("session_start", {});
@@ -237,7 +237,23 @@ describe("omp-subagent-costs plugin", () => {
 
 		expect(latestWidget(rootHarness.updates)).toEqual({
 			key: WIDGET_KEY,
-			content: ["$3.50 (async)"],
+			content: ["$3.50 (agents)"],
+			placement: "aboveEditor",
+		});
+	});
+
+	it("refreshes completed eval agent spend after its tool result", async () => {
+		const root = await fixtureRoot();
+		const harness = createHarness(root);
+		await harness.emit("session_start", {});
+		expect(latestWidget(harness.updates)?.content).toBeUndefined();
+
+		await writeTranscript(path.join(root.slice(0, -6), "eval-agent.jsonl"), 6.25, false);
+		await harness.emit("tool_result", { toolName: "eval" });
+
+		expect(latestWidget(harness.updates)).toEqual({
+			key: WIDGET_KEY,
+			content: ["$6.25 (agents)"],
 			placement: "aboveEditor",
 		});
 	});
