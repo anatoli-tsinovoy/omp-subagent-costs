@@ -141,10 +141,10 @@ describe("omp-subagent-costs plugin", () => {
 			sessionFile,
 		});
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 2.25 });
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "Async subagents: $2.25" });
+		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "$2.25 (async)" });
 
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 1.5 });
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "Async subagents: $1.50" });
+		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "$1.50 (async)" });
 	});
 
 	it("hydrates historical async cost without custom plugin entries", async () => {
@@ -154,7 +154,7 @@ describe("omp-subagent-costs plugin", () => {
 
 		await harness.emit("session_start", {});
 
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "Async subagents: $4.75" });
+		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "$4.75 (async)" });
 	});
 
 	it("clears the prior session immediately when switching", async () => {

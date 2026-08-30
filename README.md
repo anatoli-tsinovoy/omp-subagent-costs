@@ -31,7 +31,7 @@ statusLine:
 When spend is available, the status line looks like:
 
 ```text
-Async subagents: $0.01
+$0.01 (async)
 ```
 
 ## What is counted

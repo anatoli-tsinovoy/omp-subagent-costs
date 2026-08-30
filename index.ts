@@ -147,7 +147,7 @@ export default function (pi: ExtensionAPI): void {
 		if (!ctx || !ctx.hasUI || ctx.mode !== "tui") return;
 		try {
 			const cost = total();
-			ctx.ui.setStatus(STATUS_KEY, cost === 0 ? undefined : `Async subagents: $${cost.toFixed(2)}`);
+			ctx.ui.setStatus(STATUS_KEY, cost === 0 ? undefined : `$${cost.toFixed(2)} (async)`);
 		} catch {
 			// UI teardown and malformed host contexts must not break event handling.
 		}
