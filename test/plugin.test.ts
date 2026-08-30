@@ -8,10 +8,12 @@ import plugin from "../index";
 const LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
 const PROGRESS_CHANNEL = "task:subagent:progress";
 const WIDGET_KEY = "omp-subagent-costs";
+const COMMAND_NAME = "subagent-costs";
 const temporaryDirectories: string[] = [];
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => void | Promise<void>;
 type BusHandler = (value: unknown) => void;
+type CommandHandler = (args: string, ctx: ExtensionContext) => Promise<void>;
 type WidgetUpdate = { key: string; content: string[] | undefined; placement: string | undefined };
 
 class FakeEventBus {
@@ -29,11 +31,19 @@ class FakeEventBus {
 	}
 }
 
-function makeContext(updates: WidgetUpdate[], sessionFile: string, branch: readonly unknown[] = []): ExtensionContext {
+function makeContext(
+	updates: WidgetUpdate[],
+	sessionFile: string,
+	branch: readonly unknown[] = [],
+	notifications: string[] = [],
+): ExtensionContext {
 	return {
 		ui: {
 			setWidget(key: string, content: string[] | undefined, options?: { placement?: string }): void {
 				updates.push({ key, content, placement: options?.placement });
+			},
+			notify(message: string): void {
+				notifications.push(message);
 			},
 		} as unknown as ExtensionContext["ui"],
 		mode: "tui",
@@ -49,7 +59,9 @@ function createHarness(sessionFile: string, branch: readonly unknown[] = []) {
 	const updates: WidgetUpdate[] = [];
 	const eventHandlers = new Map<string, EventHandler[]>();
 	const bus = new FakeEventBus();
-	const context = makeContext(updates, sessionFile, branch);
+	const notifications: string[] = [];
+	const commands = new Map<string, CommandHandler>();
+	const context = makeContext(updates, sessionFile, branch, notifications);
 	const api = {
 		on(event: string, handler: EventHandler): void {
 			const handlers = eventHandlers.get(event) ?? [];
@@ -57,6 +69,9 @@ function createHarness(sessionFile: string, branch: readonly unknown[] = []) {
 			eventHandlers.set(event, handlers);
 		},
 		events: bus,
+		registerCommand(_name: string, options: { handler: CommandHandler }): void {
+			commands.set(_name, options.handler);
+		},
 	} as unknown as ExtensionAPI;
 	plugin(api);
 
@@ -64,8 +79,14 @@ function createHarness(sessionFile: string, branch: readonly unknown[] = []) {
 		bus,
 		context,
 		updates,
+		notifications,
 		async emit(event: string, value: unknown, target: ExtensionContext = context): Promise<void> {
 			await Promise.all((eventHandlers.get(event) ?? []).map(handler => handler(value, target)));
+		},
+		async runCommand(name: string, args = ""): Promise<void> {
+			const handler = commands.get(name);
+			if (!handler) throw new Error(`Command not registered: ${name}`);
+			await handler(args, context);
 		},
 	};
 }
@@ -167,6 +188,33 @@ describe("omp-subagent-costs plugin", () => {
 			content: ["$4.75 (async)"],
 			placement: "aboveEditor",
 		});
+	});
+
+	it("toggles the widget while continuing to track cost", async () => {
+		const root = await fixtureRoot();
+		const harness = createHarness(root);
+		const sessionFile = path.join(root.slice(0, -6), "detached-root.jsonl");
+		await harness.emit("session_start", {});
+		harness.bus.emit(LIFECYCLE_CHANNEL, {
+			id: "detached-root",
+			status: "started",
+			detached: true,
+			sessionFile,
+		});
+		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 2 });
+
+		await harness.runCommand(COMMAND_NAME);
+		expect(latestWidget(harness.updates)?.content).toBeUndefined();
+		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 3.5 });
+		expect(latestWidget(harness.updates)?.content).toBeUndefined();
+
+		await harness.runCommand(COMMAND_NAME);
+		expect(latestWidget(harness.updates)).toEqual({
+			key: WIDGET_KEY,
+			content: ["$3.50 (async)"],
+			placement: "aboveEditor",
+		});
+		expect(harness.notifications).toEqual(["Async subagent cost hidden.", "Async subagent cost shown."]);
 	});
 
 	it("clears the prior session immediately when switching", async () => {

@@ -31,6 +31,10 @@ The plugin uses OMP's above-editor widget area, so it does not depend on
 If your OMP build also provides the native `statusLine.showAsyncSubagentCost`
 setting, disable that setting to avoid displaying the same total twice.
 
+Run `/subagent-costs` to hide the widget; run it again to show it. Visibility is
+process-local and resets to shown when OMP restarts. Cost tracking continues
+while the widget is hidden.
+
 ## What is counted
 
 This plugin is async-only. It counts every assistant cost in an asynchronous

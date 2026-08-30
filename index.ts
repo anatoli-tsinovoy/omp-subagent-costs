@@ -120,6 +120,7 @@ export default function (pi: ExtensionAPI): void {
 	let activeContext: ExtensionContext | undefined;
 	let hydrated = EMPTY_HYDRATED_COSTS;
 	let refreshGeneration = 0;
+	let visible = true;
 	const liveRuns = new Map<string, LiveRun>();
 	const liveDetachedRoots = new Set<string>();
 
@@ -147,7 +148,7 @@ export default function (pi: ExtensionAPI): void {
 		if (!ctx || !ctx.hasUI || ctx.mode !== "tui") return;
 		try {
 			const cost = total();
-			const content = cost === 0 ? undefined : [`$${cost.toFixed(2)} (async)`];
+			const content = !visible || cost === 0 ? undefined : [`$${cost.toFixed(2)} (async)`];
 			ctx.ui.setWidget(WIDGET_KEY, content, { placement: "aboveEditor" });
 		} catch {
 			// UI teardown and malformed host contexts must not break event handling.
@@ -186,6 +187,16 @@ export default function (pi: ExtensionAPI): void {
 		repaint(ctx);
 		return refresh(ctx);
 	};
+
+	pi.registerCommand("subagent-costs", {
+		description: "Show or hide the async subagent cost",
+		handler: async (_args, ctx) => {
+			activeContext = ctx;
+			visible = !visible;
+			repaint(ctx);
+			ctx.ui.notify(`Async subagent cost ${visible ? "shown" : "hidden"}.`, "info");
+		},
+	});
 
 	pi.on("session_start", (_value, ctx) => reset(ctx));
 	pi.on("session_switch", (_value, ctx) => reset(ctx));
