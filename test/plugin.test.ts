@@ -1,36 +1,27 @@
-import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import plugin from "../index";
 
 const LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
 const PROGRESS_CHANNEL = "task:subagent:progress";
 const STATUS_KEY = "omp-subagent-costs";
-const CUSTOM_ENTRY_TYPE = "omp-subagent-costs";
+const temporaryDirectories: string[] = [];
 
-type EventHandler = (event: unknown, ctx: ExtensionContext) => void;
+type EventHandler = (event: unknown, ctx: ExtensionContext) => void | Promise<void>;
 type BusHandler = (value: unknown) => void;
-
-type StatusUpdate = {
-	key: string;
-	text: string | undefined;
-};
-
-type CustomEntry = {
-	customType: string;
-	data: unknown;
-};
+type StatusUpdate = { key: string; text: string | undefined };
 
 class FakeEventBus {
 	readonly #handlers = new Map<string, Set<BusHandler>>();
 
 	on(channel: string, handler: BusHandler): () => void {
-		let handlers = this.#handlers.get(channel);
-		if (!handlers) {
-			handlers = new Set<BusHandler>();
-			this.#handlers.set(channel, handlers);
-		}
+		const handlers = this.#handlers.get(channel) ?? new Set<BusHandler>();
 		handlers.add(handler);
-		return () => handlers?.delete(handler);
+		this.#handlers.set(channel, handlers);
+		return () => handlers.delete(handler);
 	}
 
 	emit(channel: string, value: unknown): void {
@@ -38,7 +29,7 @@ class FakeEventBus {
 	}
 }
 
-function makeContext(statuses: StatusUpdate[], branch: readonly unknown[] = []): ExtensionContext {
+function makeContext(statuses: StatusUpdate[], sessionFile: string, branch: readonly unknown[] = []): ExtensionContext {
 	return {
 		ui: {
 			setStatus(key: string, text: string | undefined): void {
@@ -49,38 +40,32 @@ function makeContext(statuses: StatusUpdate[], branch: readonly unknown[] = []):
 		hasUI: true,
 		sessionManager: {
 			getBranch: () => branch,
+			getSessionFile: () => sessionFile,
 		} as unknown as ExtensionContext["sessionManager"],
 	} as unknown as ExtensionContext;
 }
 
-function createHarness(branch: readonly unknown[] = []) {
+function createHarness(sessionFile: string, branch: readonly unknown[] = []) {
 	const statuses: StatusUpdate[] = [];
-	const entries: CustomEntry[] = [];
 	const eventHandlers = new Map<string, EventHandler[]>();
 	const bus = new FakeEventBus();
-	const context = makeContext(statuses, branch);
+	const context = makeContext(statuses, sessionFile, branch);
 	const api = {
 		on(event: string, handler: EventHandler): void {
 			const handlers = eventHandlers.get(event) ?? [];
 			handlers.push(handler);
 			eventHandlers.set(event, handlers);
 		},
-		appendEntry(customType: string, data: unknown): void {
-			entries.push({ customType, data });
-		},
 		events: bus,
 	} as unknown as ExtensionAPI;
-
 	plugin(api);
 
 	return {
 		bus,
 		context,
 		statuses,
-		entries,
-		makeContext: (nextBranch: readonly unknown[] = []) => makeContext(statuses, nextBranch),
-		emit(event: string, value: unknown, target: ExtensionContext = context): void {
-			for (const handler of eventHandlers.get(event) ?? []) handler(value, target);
+		async emit(event: string, value: unknown, target: ExtensionContext = context): Promise<void> {
+			await Promise.all((eventHandlers.get(event) ?? []).map(handler => handler(value, target)));
 		},
 	};
 }
@@ -89,13 +74,65 @@ function latestStatus(statuses: readonly StatusUpdate[]): StatusUpdate | undefin
 	return statuses.at(-1);
 }
 
-describe("omp-subagent-costs plugin", () => {
-	it("renders detached cumulative progress, persists terminal state, and clears zero totals", () => {
-		const harness = createHarness();
-		const sessionFile = "/tmp/detached-root.jsonl";
+async function fixtureRoot(): Promise<string> {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-subagent-cost-plugin-"));
+	temporaryDirectories.push(directory);
+	return path.join(directory, "root.jsonl");
+}
 
-		harness.emit("session_start", {});
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: undefined });
+async function writeAsyncTranscript(file: string, cost: number): Promise<void> {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	const timestamp = "2026-01-01T00:00:00.000Z";
+	const entries = [
+		{ type: "session", version: 3, id: "async", timestamp, cwd: "/tmp" },
+		{
+			type: "session_init",
+			id: "init",
+			parentId: null,
+			timestamp,
+			systemPrompt: "test",
+			task: "test",
+			tools: [],
+			detached: true,
+		},
+		{
+			type: "message",
+			id: "cost",
+			parentId: "init",
+			timestamp,
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				provider: "test",
+				model: "test",
+				api: "test",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: cost, cacheRead: 0, cacheWrite: 0, total: cost },
+				},
+				stopReason: "stop",
+				timestamp: Date.parse(timestamp),
+			},
+		},
+	];
+	await Bun.write(file, entries.map(entry => JSON.stringify(entry)).join("\n"));
+}
+
+
+afterEach(async () => {
+	await Promise.all(temporaryDirectories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true })));
+});
+
+describe("omp-subagent-costs plugin", () => {
+	it("uses cumulative live progress as an ephemeral cache", async () => {
+		const root = await fixtureRoot();
+		const harness = createHarness(root);
+		const sessionFile = path.join(root.slice(0, -6), "detached-root.jsonl");
+		await harness.emit("session_start", {});
 
 		harness.bus.emit(LIFECYCLE_CHANNEL, {
 			id: "detached-root",
@@ -103,146 +140,39 @@ describe("omp-subagent-costs plugin", () => {
 			detached: true,
 			sessionFile,
 		});
-		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 0 });
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: undefined });
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 2.25 });
 		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "Async subagents: $2.25" });
 
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 1.5 });
 		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "Async subagents: $1.50" });
-
-		harness.bus.emit(LIFECYCLE_CHANNEL, {
-			id: "detached-root",
-			status: "completed",
-			sessionFile,
-		});
-		expect(harness.entries).toEqual([
-			{
-				customType: CUSTOM_ENTRY_TYPE,
-				data: {
-					version: 1,
-					runs: [
-						{
-							key: sessionFile,
-							id: "detached-root",
-							sessionFile,
-							total: 1.5,
-							detachedRoot: true,
-							included: true,
-						},
-					],
-				},
-			},
-		]);
-
-		harness.emit("session_start", {});
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: undefined });
 	});
 
-	it("restores the last valid matching custom entry on session start", () => {
-		const sessionFile = "/tmp/restored-root.jsonl";
-		const branch = [
-			{
-				type: "custom",
-				customType: CUSTOM_ENTRY_TYPE,
-				data: {
-					version: 1,
-					runs: [
-						{
-							key: sessionFile,
-							id: "restored-root",
-							sessionFile,
-							total: 1.25,
-							detachedRoot: true,
-							included: true,
-						},
-					],
-				},
-			},
-			{ type: "message", role: "user", content: "continue" },
-			{
-				type: "custom",
-				customType: CUSTOM_ENTRY_TYPE,
-				data: {
-					version: 1,
-					runs: [
-						{
-							key: sessionFile,
-							id: "restored-root",
-							sessionFile,
-							total: 4.75,
-							detachedRoot: true,
-							included: true,
-						},
-					],
-				},
-			},
-		];
-		const harness = createHarness(branch);
+	it("hydrates historical async cost without custom plugin entries", async () => {
+		const root = await fixtureRoot();
+		await writeAsyncTranscript(path.join(root.slice(0, -6), "historical.jsonl"), 4.75);
+		const harness = createHarness(root);
 
-		harness.emit("session_start", {});
+		await harness.emit("session_start", {});
 
 		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "Async subagents: $4.75" });
-		expect(harness.entries).toEqual([]);
 	});
 
-	it("ignores malformed raw frames without changing status or persistence", () => {
-		const harness = createHarness();
-		const sessionFile = "/tmp/malformed-root.jsonl";
-
-		harness.emit("session_start", {});
+	it("clears the prior session immediately when switching", async () => {
+		const firstRoot = await fixtureRoot();
+		const harness = createHarness(firstRoot);
+		const detachedFile = path.join(firstRoot.slice(0, -6), "detached.jsonl");
+		await harness.emit("session_start", {});
 		harness.bus.emit(LIFECYCLE_CHANNEL, {
-			id: "malformed-root",
+			id: "detached",
 			status: "started",
 			detached: true,
-			sessionFile,
+			sessionFile: detachedFile,
 		});
-		harness.bus.emit(PROGRESS_CHANNEL, { id: "malformed-root", sessionFile, cost: 2 });
-		const statusCount = harness.statuses.length;
-		const statusBefore = latestStatus(harness.statuses);
-		const entriesBefore = [...harness.entries];
+		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached", sessionFile: detachedFile, cost: 6 });
 
-		harness.bus.emit(LIFECYCLE_CHANNEL, {
-			id: "malformed-root",
-			status: "finished",
-			detached: true,
-			sessionFile,
-		});
-		harness.bus.emit(PROGRESS_CHANNEL, { id: "malformed-root", sessionFile, cost: -1 });
-		harness.bus.emit(PROGRESS_CHANNEL, { id: "malformed-root", sessionFile, cost: Number.NaN });
+		const secondRoot = await fixtureRoot();
+		await harness.emit("session_switch", {}, makeContext(harness.statuses, secondRoot));
 
-		expect(harness.statuses).toHaveLength(statusCount);
-		expect(latestStatus(harness.statuses)).toEqual(statusBefore);
-		expect(harness.entries).toEqual(entriesBefore);
-	});
-
-	it("replaces the active ledger on session switch instead of accumulating across sessions", () => {
-		const harness = createHarness();
-		const firstContext = harness.context;
-		const secondContext = harness.makeContext();
-		const firstSessionFile = "/tmp/session-a.jsonl";
-		const secondSessionFile = "/tmp/session-b.jsonl";
-
-		harness.emit("session_start", {}, firstContext);
-		harness.bus.emit(LIFECYCLE_CHANNEL, {
-			id: "session-a",
-			status: "started",
-			detached: true,
-			sessionFile: firstSessionFile,
-		});
-		harness.bus.emit(PROGRESS_CHANNEL, { id: "session-a", sessionFile: firstSessionFile, cost: 6 });
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "Async subagents: $6.00" });
-
-		harness.emit("session_switch", {}, secondContext);
 		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: undefined });
-
-		harness.bus.emit(LIFECYCLE_CHANNEL, {
-			id: "session-b",
-			status: "started",
-			detached: true,
-			sessionFile: secondSessionFile,
-		});
-		harness.bus.emit(PROGRESS_CHANNEL, { id: "session-b", sessionFile: secondSessionFile, cost: 1.5 });
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "Async subagents: $1.50" });
 	});
 });
