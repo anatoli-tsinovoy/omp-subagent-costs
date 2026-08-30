@@ -17,22 +17,19 @@ Remove it with:
 omp plugin uninstall omp-subagent-costs
 ```
 
-## Configuration
+## Display
 
-The plugin reports through OMP's hook-status area. Keep
-`statusLine.showHookStatus` enabled (the default) or the status will not be
-visible:
-
-```yaml
-statusLine:
-  showHookStatus: true
-```
-
-When spend is available, the status line looks like:
+The total is pinned directly above the prompt box:
 
 ```text
 $0.01 (async)
 ```
+
+The plugin uses OMP's above-editor widget area, so it does not depend on
+`statusLine.showHookStatus`.
+
+If your OMP build also provides the native `statusLine.showAsyncSubagentCost`
+setting, disable that setting to avoid displaying the same total twice.
 
 ## What is counted
 

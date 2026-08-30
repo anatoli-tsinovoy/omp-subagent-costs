@@ -5,7 +5,7 @@ import { hasOwn, nonEmptyString, recordOf, type RecordValue, validCost } from ".
 
 const TASK_SUBAGENT_LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
 const TASK_SUBAGENT_PROGRESS_CHANNEL = "task:subagent:progress";
-const STATUS_KEY = "omp-subagent-costs";
+const WIDGET_KEY = "omp-subagent-costs";
 
 type SubagentLifecycleStatus = "started" | "completed" | "failed" | "aborted";
 
@@ -147,7 +147,8 @@ export default function (pi: ExtensionAPI): void {
 		if (!ctx || !ctx.hasUI || ctx.mode !== "tui") return;
 		try {
 			const cost = total();
-			ctx.ui.setStatus(STATUS_KEY, cost === 0 ? undefined : `$${cost.toFixed(2)} (async)`);
+			const content = cost === 0 ? undefined : [`$${cost.toFixed(2)} (async)`];
+			ctx.ui.setWidget(WIDGET_KEY, content, { placement: "aboveEditor" });
 		} catch {
 			// UI teardown and malformed host contexts must not break event handling.
 		}

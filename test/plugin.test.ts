@@ -7,12 +7,12 @@ import plugin from "../index";
 
 const LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
 const PROGRESS_CHANNEL = "task:subagent:progress";
-const STATUS_KEY = "omp-subagent-costs";
+const WIDGET_KEY = "omp-subagent-costs";
 const temporaryDirectories: string[] = [];
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => void | Promise<void>;
 type BusHandler = (value: unknown) => void;
-type StatusUpdate = { key: string; text: string | undefined };
+type WidgetUpdate = { key: string; content: string[] | undefined; placement: string | undefined };
 
 class FakeEventBus {
 	readonly #handlers = new Map<string, Set<BusHandler>>();
@@ -29,11 +29,11 @@ class FakeEventBus {
 	}
 }
 
-function makeContext(statuses: StatusUpdate[], sessionFile: string, branch: readonly unknown[] = []): ExtensionContext {
+function makeContext(updates: WidgetUpdate[], sessionFile: string, branch: readonly unknown[] = []): ExtensionContext {
 	return {
 		ui: {
-			setStatus(key: string, text: string | undefined): void {
-				statuses.push({ key, text });
+			setWidget(key: string, content: string[] | undefined, options?: { placement?: string }): void {
+				updates.push({ key, content, placement: options?.placement });
 			},
 		} as unknown as ExtensionContext["ui"],
 		mode: "tui",
@@ -46,10 +46,10 @@ function makeContext(statuses: StatusUpdate[], sessionFile: string, branch: read
 }
 
 function createHarness(sessionFile: string, branch: readonly unknown[] = []) {
-	const statuses: StatusUpdate[] = [];
+	const updates: WidgetUpdate[] = [];
 	const eventHandlers = new Map<string, EventHandler[]>();
 	const bus = new FakeEventBus();
-	const context = makeContext(statuses, sessionFile, branch);
+	const context = makeContext(updates, sessionFile, branch);
 	const api = {
 		on(event: string, handler: EventHandler): void {
 			const handlers = eventHandlers.get(event) ?? [];
@@ -63,15 +63,15 @@ function createHarness(sessionFile: string, branch: readonly unknown[] = []) {
 	return {
 		bus,
 		context,
-		statuses,
+		updates,
 		async emit(event: string, value: unknown, target: ExtensionContext = context): Promise<void> {
 			await Promise.all((eventHandlers.get(event) ?? []).map(handler => handler(value, target)));
 		},
 	};
 }
 
-function latestStatus(statuses: readonly StatusUpdate[]): StatusUpdate | undefined {
-	return statuses.at(-1);
+function latestWidget(updates: readonly WidgetUpdate[]): WidgetUpdate | undefined {
+	return updates.at(-1);
 }
 
 async function fixtureRoot(): Promise<string> {
@@ -141,10 +141,18 @@ describe("omp-subagent-costs plugin", () => {
 			sessionFile,
 		});
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 2.25 });
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "$2.25 (async)" });
+		expect(latestWidget(harness.updates)).toEqual({
+			key: WIDGET_KEY,
+			content: ["$2.25 (async)"],
+			placement: "aboveEditor",
+		});
 
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached-root", sessionFile, cost: 1.5 });
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "$1.50 (async)" });
+		expect(latestWidget(harness.updates)).toEqual({
+			key: WIDGET_KEY,
+			content: ["$1.50 (async)"],
+			placement: "aboveEditor",
+		});
 	});
 
 	it("hydrates historical async cost without custom plugin entries", async () => {
@@ -154,7 +162,11 @@ describe("omp-subagent-costs plugin", () => {
 
 		await harness.emit("session_start", {});
 
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: "$4.75 (async)" });
+		expect(latestWidget(harness.updates)).toEqual({
+			key: WIDGET_KEY,
+			content: ["$4.75 (async)"],
+			placement: "aboveEditor",
+		});
 	});
 
 	it("clears the prior session immediately when switching", async () => {
@@ -171,8 +183,12 @@ describe("omp-subagent-costs plugin", () => {
 		harness.bus.emit(PROGRESS_CHANNEL, { id: "detached", sessionFile: detachedFile, cost: 6 });
 
 		const secondRoot = await fixtureRoot();
-		await harness.emit("session_switch", {}, makeContext(harness.statuses, secondRoot));
+		await harness.emit("session_switch", {}, makeContext(harness.updates, secondRoot));
 
-		expect(latestStatus(harness.statuses)).toEqual({ key: STATUS_KEY, text: undefined });
+		expect(latestWidget(harness.updates)).toEqual({
+			key: WIDGET_KEY,
+			content: undefined,
+			placement: "aboveEditor",
+		});
 	});
 });
