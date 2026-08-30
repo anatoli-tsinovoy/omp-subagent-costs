@@ -1,0 +1,16 @@
+node_modules/
+
+# Build and coverage output
+coverage/
+dist/
+*.tsbuildinfo
+
+# Local environment and editor files
+.env
+.env.*
+.DS_Store
+.vscode/
+.idea/
+
+# Bun scratch files
+*.bun-build
