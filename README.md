@@ -1,3 +1,5 @@
+# do not install this plugin, its functionality has been upstreamed.
+
 # omp-subagent-costs
 
 An OMP plugin that shows subagent spend not already included in the main
